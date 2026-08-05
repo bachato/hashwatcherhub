@@ -2,7 +2,7 @@ manifestVersion: 1
 id: hashwatcher-gateway
 category: finance
 name: HashWatcher Gateway
-version: "1.3.0"
+version: "1.2.10"
 tagline: Monitor your ASIC miners from anywhere
 description: >-
   HashWatcher Gateway turns your Umbrel into a remote bridge for monitoring
@@ -37,9 +37,8 @@ description: >-
 
   • Tailscale key expiry monitoring with proactive alerts in the HashWatcher app
 
-  • If you're using StratumOS, enter the correct LAN subnet in the optional
-  Subnet field so it matches your network range (for example,
-  192.168.1.0/24)
+  • Your local network is detected and shared automatically. Add another
+  private network only when miners are on a separate VLAN or LAN.
 
 
   📱 HashWatcher App Integration
@@ -60,29 +59,10 @@ description: >-
   Bitcoin Node, and everything else on your dashboard
 icon: https://raw.githubusercontent.com/gpena208777/hashwatcherhub/main/hashwatcher-gateway/icon.png
 releaseNotes: >-
-  🚀 The HashWatcher Umbrel app is here — monitor your miners from anywhere in the world.
-
-
-  Connect your Umbrel to the HashWatcher iOS app and get fully remote access to your entire
-  mining fleet, secured by Tailscale. No port forwarding, no VPN setup headaches.
-
-
-  Getting started is easy:
-
-  1. Install this app on Umbrel
-
-  2. Download Tailscale on your phone
-
-  3. Add the Umbrel Community App Store URL (found in HashWatcher Settings)
-
-  4. Follow the on-screen setup guide
-
-  If you're using StratumOS, make sure you enter the optional Subnet field
-  with the correct subnet range for your network (for example,
-  192.168.1.0/24).
-
-
-  Need help? Email us directly from within the app.
+  Tailscale setup is now simpler and safer. Your Umbrel's local network is
+  detected automatically and Tailscale-only (100.x) addresses are never shared
+  as a subnet route. If miners live on another VLAN or LAN, add one or more
+  private network CIDRs in the optional field, separated by commas.
 developer: Engineered Essentials
 website: https://hashwatcher.app
 dependencies: []
