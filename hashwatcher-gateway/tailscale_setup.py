@@ -7,6 +7,7 @@ routing, query connection status, and tear down the Tailscale session.
 Inside the Docker container, tailscaled runs as root so no sudo is needed.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -55,6 +56,8 @@ _VIRTUAL_IFACE_PREFIXES = (
     "tailscale", "tun", "tap", "utun",
 )
 
+_TAILSCALE_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
 
 def _is_physical_iface(name: str) -> bool:
     return not name.startswith(_VIRTUAL_IFACE_PREFIXES) and name != "lo"
@@ -67,7 +70,7 @@ def _cidr_from_ip_line(line: str) -> Optional[str]:
     cidr = match.group(1)
     parts = cidr.split("/")
     ip_addr = parts[0]
-    if _is_docker_internal_ip(ip_addr):
+    if _is_docker_internal_ip(ip_addr) or not _is_private_lan_ip(ip_addr):
         return None
     prefix = int(parts[1])
     octets = ip_addr.split(".")
@@ -80,22 +83,67 @@ def _is_docker_internal_ip(ip: str) -> bool:
     """Return True if the IP belongs to a Docker/container-internal range."""
     if not ip:
         return True
-    parts = ip.split(".")
-    if len(parts) != 4:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.version != 4 or addr.is_loopback:
         return True
-    a, b = int(parts[0]), int(parts[1])
-    if a == 127:
-        return True
-    if a == 172 and 16 <= b <= 31:
-        return True
-    if a == 10:
+    # Umbrel's Docker bridge uses this range. Keep it out of automatic
+    # detection, while allowing real 10.x and 192.168.x LANs.
+    if addr in ipaddress.ip_network("172.16.0.0/12"):
         return True
     return False
 
 
+def _is_private_lan_ip(ip: str) -> bool:
+    """Return True only for a private IPv4 LAN address, never Tailscale CGNAT."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return bool(
+        addr.version == 4
+        and addr.is_private
+        and not addr.is_loopback
+        and not addr.is_link_local
+        and addr not in _TAILSCALE_CGNAT_NETWORK
+    )
+
+
+def parse_lan_routes(raw: str) -> tuple[List[str], List[str]]:
+    """Parse optional extra routes into safe, canonical private IPv4 CIDRs."""
+    routes: List[ipaddress.IPv4Network] = []
+    errors: List[str] = []
+    entries = [entry.strip() for entry in raw.replace(";", ",").replace("\n", ",").split(",")]
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=True)
+        except ValueError:
+            errors.append(f"{entry!r} is not a network CIDR (use e.g. 192.168.1.0/24)")
+            continue
+        if network.version != 4:
+            errors.append(f"{entry!r} is not an IPv4 network")
+            continue
+        network_v4 = network
+        if network_v4.prefixlen < 8 or network_v4.prefixlen > 30:
+            errors.append(f"{entry!r} must use a prefix from /8 through /30")
+            continue
+        if not _is_private_lan_ip(str(network_v4.network_address)):
+            errors.append(f"{entry!r} is not a private LAN network")
+            continue
+        if any(network_v4.overlaps(existing) for existing in routes):
+            errors.append(f"{entry!r} overlaps another network already listed")
+            continue
+        routes.append(network_v4)
+    return [str(route) for route in routes], errors
+
+
 def _subnet_from_ip(ip: str) -> Optional[str]:
     """Derive a /24 subnet from a single IP address."""
-    if not ip or _is_docker_internal_ip(ip):
+    if not ip or _is_docker_internal_ip(ip) or not _is_private_lan_ip(ip):
         return None
     octets = ip.split(".")
     if len(octets) != 4:
@@ -207,6 +255,28 @@ def detect_subnet(interface: str = "eth0") -> Optional[str]:
     return None
 
 
+def resolve_advertised_routes(additional_routes: Optional[str] = None) -> Dict[str, Any]:
+    """Build the automatic local route plus optional separate private LANs."""
+    extras, errors = parse_lan_routes(additional_routes or "")
+    if errors:
+        return {"ok": False, "error": "; ".join(errors)}
+
+    detected = detect_subnet()
+    routes: List[str] = []
+    if detected:
+        routes.append(detected)
+        detected_network = ipaddress.ip_network(detected)
+        for route in extras:
+            if route != detected and ipaddress.ip_network(route).overlaps(detected_network):
+                return {"ok": False, "error": f"{route} overlaps the local network ({detected}); add a separate network instead."}
+    for route in extras:
+        if route not in routes:
+            routes.append(route)
+    if not routes:
+        return {"ok": False, "error": "We could not find your local network. Enter the network your miners use, for example 192.168.1.0/24."}
+    return {"ok": True, "detectedRoute": detected, "additionalRoutes": extras, "routes": routes}
+
+
 def setup(auth_key: str, subnet_cidr: Optional[str] = None) -> Dict[str, Any]:
     """Authenticate Tailscale and enable subnet routing.
 
@@ -228,16 +298,18 @@ def setup(auth_key: str, subnet_cidr: Optional[str] = None) -> Dict[str, Any]:
 
     _ensure_ip_forwarding()
 
-    resolved_cidr = (subnet_cidr or "").strip() or detect_subnet()
-    if not resolved_cidr:
-        return {"ok": False, "error": "Could not detect local subnet. Enter your LAN subnet in the \"Subnet (optional)\" field (e.g. 192.168.1.0/24 or 10.51.127.0/24) and try again."}
+    route_resolution = resolve_advertised_routes(subnet_cidr)
+    if not route_resolution.get("ok"):
+        return {"ok": False, "error": route_resolution.get("error", "Could not choose a local network")}
+    routes = route_resolution["routes"]
+    routes_csv = ",".join(routes)
 
     ts_hostname = os.getenv("PI_HOSTNAME", "HashWatcherGateway")
 
     cmd = [
         "tailscale", "up",
         f"--authkey={auth_key}",
-        f"--advertise-routes={resolved_cidr}",
+        f"--advertise-routes={routes_csv}",
         f"--hostname={ts_hostname}",
         "--accept-routes",
         "--reset",
@@ -265,12 +337,14 @@ def setup(auth_key: str, subnet_cidr: Optional[str] = None) -> Dict[str, Any]:
         time.sleep(2 if i < 5 else 3)
         s = status()
         if s.get("authenticated") and s.get("ip"):
-            return {"ok": True, "advertisedRoutes": [resolved_cidr], "ip": s["ip"], "hostname": s.get("hostname")}
+            return {"ok": True, "advertisedRoutes": routes, "detectedRoute": route_resolution.get("detectedRoute"), "additionalRoutes": route_resolution.get("additionalRoutes", []), "ip": s["ip"], "hostname": s.get("hostname")}
 
     s = status()
     return {
         "ok": True,
-        "advertisedRoutes": [resolved_cidr],
+        "advertisedRoutes": routes,
+        "detectedRoute": route_resolution.get("detectedRoute"),
+        "additionalRoutes": route_resolution.get("additionalRoutes", []),
         "ip": s.get("ip"),
         "hostname": s.get("hostname") or ts_hostname,
         "note": "Tailscale connected but IP may still be propagating. The page will reload shortly.",
@@ -364,20 +438,23 @@ def down() -> Dict[str, Any]:
 def up() -> Dict[str, Any]:
     """Turn Tailscale back on using existing auth (no auth key needed).
 
-    Always re-detects the local subnet so that stale Docker-bridge routes
-    (e.g. 172.17.0.0/24) are replaced with the real LAN subnet.
+    Preserves the routes selected during setup so optional VLAN/LAN entries
+    are not discarded on reconnect.
     """
     if not is_installed():
         return {"ok": False, "error": "tailscale is not installed"}
     ts_hostname = os.getenv("PI_HOSTNAME", "HashWatcherGateway")
 
-    fresh_subnet = detect_subnet()
-    if fresh_subnet:
-        routes_str = fresh_subnet
+    prefs = _get_prefs()
+    saved_routes = prefs.get("AdvertiseRoutes", []) if prefs else []
+    saved_csv = ",".join(str(route) for route in saved_routes if isinstance(route, str))
+    saved_valid, _saved_errors = parse_lan_routes(saved_csv)
+    if saved_valid:
+        routes = saved_valid
     else:
-        prefs = _get_prefs()
-        routes = prefs.get("AdvertiseRoutes", []) or []
-        routes_str = ",".join(routes) if routes else ""
+        route_resolution = resolve_advertised_routes()
+        routes = route_resolution.get("routes", []) if route_resolution.get("ok") else []
+    routes_str = ",".join(routes)
 
     _ensure_ip_forwarding()
     cmd = ["tailscale", "up", f"--hostname={ts_hostname}", "--accept-routes"]
@@ -388,7 +465,7 @@ def up() -> Dict[str, Any]:
         stderr = (r.stderr or r.stdout or "").strip()
         return {"ok": False, "error": stderr or "tailscale up failed"}
     s = status()
-    return {"ok": True, "ip": s.get("ip"), "hostname": s.get("hostname"), "advertisedRoutes": [routes_str] if routes_str else []}
+    return {"ok": True, "ip": s.get("ip"), "hostname": s.get("hostname"), "advertisedRoutes": routes}
 
 
 def logout() -> Dict[str, Any]:

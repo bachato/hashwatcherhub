@@ -65,10 +65,10 @@ Go to [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admi
 
 Paste the auth key into the gateway's setup page. The gateway connects to your Tailscale network automatically.
 
-### Step 4 — Approve Subnet Routes
+### Step 4 — Approve Shared Networks
 
-Go to the [Tailscale Machines page](https://login.tailscale.com/admin/machines), find **HashWatcherGateway**, click **…** → **Edit route settings**, and approve your local subnet (e.g. `192.168.1.0/24`).
-  Troubleshooting: If Tailscale shows as connected but your miners or local devices are not reachable remotely, confirm that the subnet listed in the Umbrel app matches your router’s local gateway network. For example, if your router is 170.100.1.1, the subnet should typically be 170.100.1.0/24. If the subnet in the gateway configuration does not match your actual LAN range, remote access will not work even though Tailscale appears connected.
+Go to the [Tailscale Machines page](https://login.tailscale.com/admin/machines), find **HashWatcherGateway**, click **…** → **Edit route settings**, and approve the automatically detected local network (plus any optional VLAN/LAN routes you added).
+  Troubleshooting: The gateway now detects your private LAN automatically and never advertises Tailscale-only `100.x` addresses. If miners live on a separate VLAN or LAN, add those private CIDRs in the optional field, separated by commas (for example `192.168.10.0/24,10.0.0.0/24`). Remote access still requires those routes to be approved in Tailscale.
 
 ### Step 5 — Install Tailscale on Your Phone
 
@@ -91,6 +91,7 @@ That's all. There is no need to change or edit any of the devices IP address in 
 - Tailscale runs inside the app — no separate Tailscale installation needed
 - Completely isolated from any Tailscale you already have on your Umbrel
 - Secure encrypted tunnel with no port forwarding or dynamic DNS
+- Safe routing setup: private LAN is detected automatically; Tailscale-only `100.x` addresses are never advertised; extra VLAN/LAN CIDRs can be added as a comma-separated list
 - Key expiry monitoring with alerts in the dashboard and the HashWatcher app
 
 **Full Umbrel Remote Access**
